@@ -17,6 +17,10 @@ def generate_launch_description():
                 output="screen",
                 parameters=[{"robot_description": robot_desc}],
                 arguments=[GO2_DESCRIPTION_URDF_PATH],
+                ros_arguments=[
+                    "--log-level", "robot_state_publisher:=warn",
+                    "--log-level", "kdl_parser:=error",
+                ],
             ),
             Node(
                 package="go2_odometry",
