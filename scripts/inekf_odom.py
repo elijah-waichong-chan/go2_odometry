@@ -4,9 +4,15 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSHistoryPolicy
+from rclpy.qos import (
+    QoSProfile,
+    QoSHistoryPolicy,
+    QoSDurabilityPolicy,
+    QoSReliabilityPolicy,
+)
 
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
 from unitree_go.msg import LowState
 import pinocchio as pin
 
@@ -39,6 +45,9 @@ class Inekf(Node):
                 ("contact_noise", 0.001, PD(description="Inekf covariance value")),
                 ("joint_position_noise", 0.001, PD(description="Noise on joint configuration measurements to project using jacobian")),
                 ("contact_velocity_noise", 0.001, PD(description="Noise on contact velocity")),
+                ("use_kinematic_height", True, PD(description="Override base z using contact kinematics")),
+                ("kinematic_height_offset", 0.025, PD(description="Offset added to kinematic height (meters)")),
+                ("ready_delay_sec", 3.0, PD(description="Delay before publishing /status/inekf/is_running=true after filter starts")),
             ],
         )
         # fmt: on
@@ -46,6 +55,9 @@ class Inekf(Node):
         self.base_frame = self.get_parameter("base_frame").value
         self.odom_frame = self.get_parameter("odom_frame").value
         self.dt = 1.0 / self.get_parameter("robot_freq").value
+        self.ready_delay_sec = float(self.get_parameter("ready_delay_sec").value)
+        self.use_kinematic_height = bool(self.get_parameter("use_kinematic_height").value)
+        self.kinematic_height_offset = float(self.get_parameter("kinematic_height_offset").value)
         self.pause = True  # By default filter is paused and wait for the first feet contact to start
 
         # Load robot model
@@ -70,6 +82,23 @@ class Inekf(Node):
         )
         self.odom_publisher = self.create_publisher(Odometry, "/odometry/filtered", 1)
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.is_running = False
+        self.filter_started = False
+        self.ready_start_time = None
+        self.ready_sent = False
+        ready_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+        self.ready_publisher = self.create_publisher(Bool, "/status/inekf/is_running", ready_qos)
+        self.ready_publisher.publish(Bool(data=False))
+        self.standing_ready = False
+        self._standing_wait_logged = False
+        self.standing_sub = self.create_subscription(
+            Bool, "/status/standing_init", self.on_standing_status, ready_qos
+        )
 
         # Invariant EKF
         gravity = np.array([0, 0, -9.81])
@@ -91,25 +120,44 @@ class Inekf(Node):
 
         self.joint_pos_noise = self.get_parameter("joint_position_noise").value
         self.contact_vel_noise = self.get_parameter("contact_velocity_noise").value
+        self._last_contact_list = None
+        self._last_base_foot_pos = None
 
         self.filter = InEKF(initial_state, noise_params)
         self.filter.setGravity(gravity)
 
     def listener_callback(self, msg):
+        if not self.standing_ready:
+            if not self._standing_wait_logged:
+                self.get_logger().info("Waiting for /status/standing_init before starting filter.")
+                self._standing_wait_logged = True
+            return
+
         # Format IMU measurements
         imu_state = np.concatenate([msg.imu_state.gyroscope, msg.imu_state.accelerometer])
 
         # Feet kinematic data
-        contact_list, pose_list, normed_covariance_list = self.feet_transformations(msg)
+        contact_list, pose_list, normed_covariance_list, base_foot_pos = self.feet_transformations(msg)
+        self._last_contact_list = contact_list
+        self._last_base_foot_pos = base_foot_pos
 
         if self.pause:
             if all(contact_list):
                 self.pause = False
                 self.initialize_filter(msg)
+                self.is_running = True
+                self.filter_started = True
+                self.ready_start_time = self.get_clock().now()
                 self.get_logger().info("All feet in contact with the ground: starting filter.")
             else:
                 self.get_logger().info("Waiting for all feet to touch the ground to start filter.", once=True)
                 return  # Skip the rest of the filter
+
+        if self.filter_started and not self.ready_sent:
+            elapsed = (self.get_clock().now() - self.ready_start_time).nanoseconds * 1e-9
+            if elapsed >= self.ready_delay_sec:
+                self.ready_publisher.publish(Bool(data=True))
+                self.ready_sent = True
 
         # Propagation step: using IMU
         self.filter.propagate(imu_state, self.dt)
@@ -137,6 +185,10 @@ class Inekf(Node):
         self.filter.correctKinematics(kinematics_list)
 
         self.publish_state(self.filter.getState(), msg.imu_state.gyroscope)
+
+    def on_standing_status(self, msg: Bool):
+        self.standing_ready = bool(msg.data)
+
 
     def get_qvf_pinocchio(state_msg):
         def unitree_to_urdf_vec(vec):
@@ -213,21 +265,25 @@ class Inekf(Node):
         pin.updateFramePlacements(self.robot.model, self.robot.data)
         pin.computeJointJacobians(self.robot.model, self.robot.data)
 
-        # Compute foot kinematics adn jacobian
+        # Compute foot kinematics and jacobian
         oMimu = self.robot.data.oMf[self.imu_frame_id]
+        oMbase = self.robot.data.oMf[self.base_frame_id]
         contact_list = feet_contacts(f_pin)
         pose_list = []
+        base_foot_pos = []
         normed_covariance_list = []
         for i in range(4):
             oMfoot = self.robot.data.oMf[self.foot_frame_id[i]]
             imuMfoot = oMimu.actInv(oMfoot)
             pose_list.append(imuMfoot)
+            baseMfoot = oMbase.actInv(oMfoot)
+            base_foot_pos.append(baseMfoot.translation.copy())
 
             Jc = pin.getFrameJacobian(self.robot.model, self.robot.data, self.foot_frame_id[i], pin.LOCAL)[:3, 6:]
             normed_cov_pose = Jc @ Jc.transpose()
             normed_covariance_list.append(normed_cov_pose)
 
-        return contact_list, pose_list, normed_covariance_list
+        return contact_list, pose_list, normed_covariance_list, base_foot_pos
 
     def publish_state(self, filter_state, twist_angular_vel):
         # Get filter state
@@ -242,6 +298,16 @@ class Inekf(Node):
         # Transform to base frame
         base_pose = oMimu.act(self.imuMbase)
         base_velocity = self.imuMbase.actInv(v_imu_local)
+
+        if self.use_kinematic_height and self._last_contact_list and self._last_base_foot_pos:
+            contact_ids = [i for i, c in enumerate(self._last_contact_list) if c]
+            if contact_ids:
+                R_wb = base_pose.rotation
+                z_vals = []
+                for i in contact_ids:
+                    p_bf = self._last_base_foot_pos[i]
+                    z_vals.append(-(R_wb @ p_bf)[2] + self.kinematic_height_offset)
+                base_pose.translation[2] = float(np.mean(z_vals))
 
         # Convert to quaternion
         base_quaternion = pin.Quaternion(base_pose.rotation)
