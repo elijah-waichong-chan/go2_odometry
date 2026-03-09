@@ -12,7 +12,7 @@ from rclpy.qos import (
 )
 
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Int32
 from unitree_go.msg import LowState
 import pinocchio as pin
 
@@ -27,6 +27,9 @@ from unitree_description.loader import loadGo2
 # Main Class
 # ==============================================================================
 class Inekf(Node):
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_STANDING_INIT = 2
+
     def __init__(self):
         super().__init__("inekf")
 
@@ -47,7 +50,7 @@ class Inekf(Node):
                 ("contact_velocity_noise", 0.001, PD(description="Noise on contact velocity")),
                 ("use_kinematic_height", True, PD(description="Override base z using contact kinematics")),
                 ("kinematic_height_offset", 0.025, PD(description="Offset added to kinematic height (meters)")),
-                ("ready_delay_sec", 3.0, PD(description="Delay before publishing /status/inekf/is_running=true after filter starts")),
+                ("status_hz", 10.0, PD(description="Publish rate for /status/state_estimator")),
             ],
         )
         # fmt: on
@@ -55,7 +58,7 @@ class Inekf(Node):
         self.base_frame = self.get_parameter("base_frame").value
         self.odom_frame = self.get_parameter("odom_frame").value
         self.dt = 1.0 / self.get_parameter("robot_freq").value
-        self.ready_delay_sec = float(self.get_parameter("ready_delay_sec").value)
+        self.status_hz = max(1.0, float(self.get_parameter("status_hz").value))
         self.use_kinematic_height = bool(self.get_parameter("use_kinematic_height").value)
         self.kinematic_height_offset = float(self.get_parameter("kinematic_height_offset").value)
         self.pause = True  # By default filter is paused and wait for the first feet contact to start
@@ -84,21 +87,20 @@ class Inekf(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         self.is_running = False
         self.filter_started = False
-        self.ready_start_time = None
-        self.ready_sent = False
         ready_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             reliability=QoSReliabilityPolicy.RELIABLE,
         )
-        self.ready_publisher = self.create_publisher(Bool, "/status/inekf/is_running", ready_qos)
-        self.ready_publisher.publish(Bool(data=False))
+        self.status_publisher = self.create_publisher(Int32, "/status/state_estimator", ready_qos)
+        self.status_code = self.STATUS_WAITING_FOR_STANDING_INIT
         self.standing_ready = False
         self._standing_wait_logged = False
         self.standing_sub = self.create_subscription(
-            Bool, "/status/standing_init", self.on_standing_status, ready_qos
+            Int32, "/status/standing_init", self.on_standing_status, ready_qos
         )
+        self.status_timer = self.create_timer(1.0 / self.status_hz, self.on_status_timer)
 
         # Invariant EKF
         gravity = np.array([0, 0, -9.81])
@@ -126,11 +128,18 @@ class Inekf(Node):
         self.filter = InEKF(initial_state, noise_params)
         self.filter.setGravity(gravity)
 
+    def _set_status(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+
+    def on_status_timer(self) -> None:
+        self.status_publisher.publish(Int32(data=int(self.status_code)))
+
     def listener_callback(self, msg):
         if not self.standing_ready:
             if not self._standing_wait_logged:
                 self.get_logger().info("Waiting for /status/standing_init before starting filter.")
                 self._standing_wait_logged = True
+            self._set_status(self.STATUS_WAITING_FOR_STANDING_INIT)
             return
 
         # Format IMU measurements
@@ -147,17 +156,13 @@ class Inekf(Node):
                 self.initialize_filter(msg)
                 self.is_running = True
                 self.filter_started = True
-                self.ready_start_time = self.get_clock().now()
+                self._set_status(self.STATUS_RUNNING)
                 self.get_logger().info("All feet in contact with the ground: starting filter.")
             else:
                 self.get_logger().info("Waiting for all feet to touch the ground to start filter.", once=True)
                 return  # Skip the rest of the filter
-
-        if self.filter_started and not self.ready_sent:
-            elapsed = (self.get_clock().now() - self.ready_start_time).nanoseconds * 1e-9
-            if elapsed >= self.ready_delay_sec:
-                self.ready_publisher.publish(Bool(data=True))
-                self.ready_sent = True
+        if self.filter_started:
+            self._set_status(self.STATUS_RUNNING)
 
         # Propagation step: using IMU
         self.filter.propagate(imu_state, self.dt)
@@ -186,8 +191,8 @@ class Inekf(Node):
 
         self.publish_state(self.filter.getState(), msg.imu_state.gyroscope)
 
-    def on_standing_status(self, msg: Bool):
-        self.standing_ready = bool(msg.data)
+    def on_standing_status(self, msg: Int32):
+        self.standing_ready = int(msg.data) == 3
 
 
     def get_qvf_pinocchio(state_msg):
