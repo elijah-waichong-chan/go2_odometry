@@ -12,7 +12,7 @@ from rclpy.qos import (
 )
 
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Int32
+from go2_msgs.msg import LoopStatus
 from unitree_go.msg import LowState
 import pinocchio as pin
 
@@ -21,6 +21,18 @@ from geometry_msgs.msg import TransformStamped
 from rcl_interfaces.msg import ParameterDescriptor as PD
 from inekf import RobotState, NoiseParams, InEKF, Kinematics
 from unitree_description.loader import loadGo2
+
+
+def _make_loop_status(status_code: int) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = -1.0
+    msg.p99_loop_ms = -1.0
+    msg.max_loop_ms = -1.0
+    msg.budget_ms = -1.0
+    msg.deadline_miss_count = -1
+    msg.sample_count = -1
+    return msg
 
 
 # ==============================================================================
@@ -93,12 +105,12 @@ class Inekf(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             reliability=QoSReliabilityPolicy.RELIABLE,
         )
-        self.status_publisher = self.create_publisher(Int32, "/status/state_estimator", ready_qos)
+        self.status_publisher = self.create_publisher(LoopStatus, "/status/state_estimator", ready_qos)
         self.status_code = self.STATUS_WAITING_FOR_STANDING_INIT
         self.standing_ready = False
         self._standing_wait_logged = False
         self.standing_sub = self.create_subscription(
-            Int32, "/status/standing_init", self.on_standing_status, ready_qos
+            LoopStatus, "/status/standing_init", self.on_standing_status, ready_qos
         )
         self.status_timer = self.create_timer(1.0 / self.status_hz, self.on_status_timer)
 
@@ -132,7 +144,7 @@ class Inekf(Node):
         self.status_code = int(status_code)
 
     def on_status_timer(self) -> None:
-        self.status_publisher.publish(Int32(data=int(self.status_code)))
+        self.status_publisher.publish(_make_loop_status(self.status_code))
 
     def listener_callback(self, msg):
         if not self.standing_ready:
@@ -191,8 +203,8 @@ class Inekf(Node):
 
         self.publish_state(self.filter.getState(), msg.imu_state.gyroscope)
 
-    def on_standing_status(self, msg: Int32):
-        self.standing_ready = int(msg.data) == 3
+    def on_standing_status(self, msg: LoopStatus):
+        self.standing_ready = int(msg.status) == 3
 
 
     def get_qvf_pinocchio(state_msg):
