@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(go2_msgs REQUIRED)
 find_package(unitree_go REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -23,7 +24,7 @@ find_package(rosidl_default_generators REQUIRED)
 unset(PYTHON_SOABI)
 
 add_executable(state_converter_node src/go2_state_converter_node.cpp)
-ament_target_dependencies(state_converter_node rclcpp unitree_go sensor_msgs)
+ament_target_dependencies(state_converter_node rclcpp go2_msgs unitree_go sensor_msgs)
 
 install(TARGETS
   state_converter_node

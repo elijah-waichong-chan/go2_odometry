@@ -128,11 +128,11 @@ This launchfile is usefull to use other standard ros node out of the box. For in
 TO do so, this launchfile starts the following nodes:
 
 ##### go2_odometry/state_converter_node.cpp
-Listens to `unitree_ros2/LowState` messages and splits them into "standard" ros messages. It also re-arranges the joint order to match urdf order (which is not the order sent by the unitree robot).
+Listens to `unitree_ros2/LowState` messages and splits them into "standard" ros messages. It also re-arranges the joint order to match urdf order (which is not the order sent by the unitree robot). Arm joint positions are also merged in from `/arm_angles`.
 
 The published topics are the following:
 * `/imu`: populated by `unitree_ros2/LowState`.`imu`
-* `/joint_states`: populated by `unitree_ros2/LowState`.`motor_state`.<`d`/`dq`/...>
+* `/joint_states`: leg state from `unitree_ros2/LowState`.`motor_state`.<`d`/`dq`/...> plus `d1_Joint1..d1_Joint6` positions from `/arm_angles.angle_deg`
 
 The messages are timestamped using the host clock upon `/lowstate` msg reception (because the `unitree_ros2/LowState` msg is not timestamped)
 

@@ -1,6 +1,10 @@
+#include <array>
+#include <cassert>
 #include <functional>
 #include <string>
+#include <vector>
 
+#include "go2_msgs/msg/arm_angles.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rosgraph_msgs/msg/clock.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -12,13 +16,18 @@ class StateConverterNode : public rclcpp::Node
 public:
   StateConverterNode()
   : Node("state_converter")
-  , nq(12)
+  , leg_nq_(12)
+  , arm_nq_(6)
   // clang-format off
-  , urdf_joint_names_({
+  , leg_joint_names_({
         "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
         "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
         "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
         "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    })
+  , arm_joint_names_({
+        "d1_Joint1", "d1_Joint2", "d1_Joint3",
+        "d1_Joint4", "d1_Joint5", "d1_Joint6",
     })
     , urdf_to_sdk_index_({
         3,  4,  5,
@@ -34,14 +43,19 @@ public:
 
     lowstate_subscription_ = this->create_subscription<unitree_go::msg::LowState>(
       "lowstate", 10, std::bind(&StateConverterNode::state_callback, this, std::placeholders::_1));
+    arm_angles_subscription_ = this->create_subscription<go2_msgs::msg::ArmAngles>(
+      "arm_angles", 10, std::bind(&StateConverterNode::arm_angles_callback, this, std::placeholders::_1));
 
     // Pre-fill joint state messages
-    assert(urdf_joint_names_.size() == nq);
-    assert(urdf_to_sdk_index_.size() == nq);
-    jointstate_msg_.name = urdf_joint_names_;
-    jointstate_msg_.position.resize(nq);
-    jointstate_msg_.velocity.resize(nq);
-    jointstate_msg_.effort.resize(nq);
+    assert(leg_joint_names_.size() == leg_nq_);
+    assert(arm_joint_names_.size() == arm_nq_);
+    assert(urdf_to_sdk_index_.size() == leg_nq_);
+    jointstate_msg_.name = leg_joint_names_;
+    jointstate_msg_.name.insert(
+      jointstate_msg_.name.end(), arm_joint_names_.begin(), arm_joint_names_.end());
+    jointstate_msg_.position.assign(leg_nq_ + arm_nq_, 0.0);
+    jointstate_msg_.velocity.assign(leg_nq_ + arm_nq_, 0.0);
+    jointstate_msg_.effort.assign(leg_nq_ + arm_nq_, 0.0);
 
     imu_msg_.header.frame_id = "imu";
     // See datasheet https://www.wit-motion.com/proztcgd/7.html
@@ -51,33 +65,59 @@ public:
   }
 
 protected:
-  const size_t nq;                                  // Robot DoF
-  const std::vector<std::string> urdf_joint_names_; // Robot joint names
-  const std::vector<size_t> urdf_to_sdk_index_;     // Joint indexes in ros msgs (in the urdf order)
+  const size_t leg_nq_;                            // Go2 leg DoF
+  const size_t arm_nq_;                            // D1 arm DoF published into JointState
+  const std::vector<std::string> leg_joint_names_; // Go2 leg joint names
+  const std::vector<std::string> arm_joint_names_; // D1 arm joint names
+  const std::vector<size_t> urdf_to_sdk_index_;    // Joint indexes in ros msgs (in the urdf order)
 
 private:
+  void arm_angles_callback(const go2_msgs::msg::ArmAngles::SharedPtr msg);
+  void publish_joint_state();
   void state_callback(const unitree_go::msg::LowState::SharedPtr msg);
 
   rosgraph_msgs::msg::Clock clock_msg_;
   sensor_msgs::msg::Imu imu_msg_;
   sensor_msgs::msg::JointState jointstate_msg_;
+  bool have_lowstate_{false};
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr jointstate_publisher_;
+  rclcpp::Subscription<go2_msgs::msg::ArmAngles>::SharedPtr arm_angles_subscription_;
   rclcpp::Subscription<unitree_go::msg::LowState>::SharedPtr lowstate_subscription_;
 };
+
+void StateConverterNode::publish_joint_state()
+{
+  jointstate_msg_.header.stamp = this->get_clock()->now();
+  jointstate_publisher_->publish(jointstate_msg_);
+}
+
+void StateConverterNode::arm_angles_callback(const go2_msgs::msg::ArmAngles::SharedPtr msg)
+{
+  // ArmAngles currently reports 7 values; publish the six revolute arm joints that exist in the URDF.
+  for (size_t index_arm = 0; index_arm < arm_nq_; ++index_arm)
+  {
+    jointstate_msg_.position[leg_nq_ + index_arm] = static_cast<double>(msg->angle_deg[index_arm]);
+  }
+
+  if (have_lowstate_)
+  {
+    publish_joint_state();
+  }
+}
 
 // Extract and re-order joint sensor measurements
 void StateConverterNode::state_callback(const unitree_go::msg::LowState::SharedPtr msg)
 {
-  jointstate_msg_.header.stamp = this->get_clock()->now();
-  for (size_t index_urdf = 0; index_urdf < nq; index_urdf++)
+  for (size_t index_urdf = 0; index_urdf < leg_nq_; index_urdf++)
   {
     const size_t index_sdk = urdf_to_sdk_index_[index_urdf];
     jointstate_msg_.position[index_urdf] = msg->motor_state[index_sdk].q;
     jointstate_msg_.velocity[index_urdf] = msg->motor_state[index_sdk].dq;
     jointstate_msg_.effort[index_urdf] = msg->motor_state[index_sdk].tau_est;
   }
-  jointstate_publisher_->publish(jointstate_msg_);
+  have_lowstate_ = true;
+  publish_joint_state();
 
   imu_msg_.header.stamp = this->get_clock()->now();
   imu_msg_.orientation.w = msg->imu_state.quaternion[0];
