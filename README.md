@@ -132,13 +132,13 @@ Listens to `unitree_ros2/LowState` messages and splits them into "standard" ros 
 
 The published topics are the following:
 * `/imu`: populated by `unitree_ros2/LowState`.`imu`
-* `/joint_states`: leg state from `unitree_ros2/LowState`.`motor_state`.<`d`/`dq`/...> plus `d1_Joint1..d1_Joint6` positions from `/arm_angles.angle_deg`
+* `/joint_states`: leg state from `unitree_ros2/LowState`.`motor_state`.<`d`/`dq`/...> plus `d1_Joint1..d1_Joint6` positions converted from `/arm_angles.angle_deg` into radians, with sign flips applied to `d1_Joint1` and `d1_Joint4`
 
 The messages are timestamped using the host clock upon `/lowstate` msg reception (because the `unitree_ros2/LowState` msg is not timestamped)
 
 
 ##### robot_state_publisher
-Standard ros node that listens to `/joint_states` topic and publishes TF transform for all links of a robot.
+Standard ros node that listens to `/joint_states` topic and publishes TF transform for all links of a robot. It uses the combined Go2 + D1 description, so TF includes the mounted arm links as well.
 
 Published topics:
 * `/tf` and `/tf_static`: Link relative positions, populated from `/joint_states`.

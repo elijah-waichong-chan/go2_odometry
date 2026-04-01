@@ -1,12 +1,26 @@
 from launch import LaunchDescription
+from launch.substitutions import Command, PathJoinSubstitution
 from launch_ros.actions import Node
-from unitree_description import GO2_DESCRIPTION_URDF_PATH
+from launch_ros.descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # Read go2 urdf from unitree_description
-    with open(GO2_DESCRIPTION_URDF_PATH, "r") as info:
-        robot_desc = info.read()
+    robot_desc = ParameterValue(
+        Command(
+            [
+                "xacro ",
+                PathJoinSubstitution(
+                    [
+                        FindPackageShare("go2_d1_integration"),
+                        "urdf",
+                        "go2_d1_combined.xacro",
+                    ]
+                ),
+            ]
+        ),
+        value_type=str,
+    )
 
     return LaunchDescription(
         [
@@ -16,7 +30,6 @@ def generate_launch_description():
                 name="robot_state_publisher",
                 output="screen",
                 parameters=[{"robot_description": robot_desc}],
-                arguments=[GO2_DESCRIPTION_URDF_PATH],
                 ros_arguments=[
                     "--log-level", "robot_state_publisher:=warn",
                     "--log-level", "kdl_parser:=error",

@@ -1,5 +1,6 @@
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <functional>
 #include <string>
 #include <vector>
@@ -86,6 +87,11 @@ private:
   rclcpp::Subscription<unitree_go::msg::LowState>::SharedPtr lowstate_subscription_;
 };
 
+namespace
+{
+constexpr double kDegToRad = M_PI / 180.0;
+}
+
 void StateConverterNode::publish_joint_state()
 {
   jointstate_msg_.header.stamp = this->get_clock()->now();
@@ -97,7 +103,12 @@ void StateConverterNode::arm_angles_callback(const go2_msgs::msg::ArmAngles::Sha
   // ArmAngles currently reports 7 values; publish the six revolute arm joints that exist in the URDF.
   for (size_t index_arm = 0; index_arm < arm_nq_; ++index_arm)
   {
-    jointstate_msg_.position[leg_nq_ + index_arm] = static_cast<double>(msg->angle_deg[index_arm]);
+    double angle_rad = static_cast<double>(msg->angle_deg[index_arm]) * kDegToRad;
+    if (index_arm == 0 || index_arm == 3)
+    {
+      angle_rad = -angle_rad;
+    }
+    jointstate_msg_.position[leg_nq_ + index_arm] = angle_rad;
   }
 
   if (have_lowstate_)
